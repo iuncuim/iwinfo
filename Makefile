@@ -25,12 +25,12 @@ ifneq ($(filter madwifi,$(IWINFO_BACKENDS)),)
 	IWINFO_LIB_OBJ += iwinfo_madwifi.o
 endif
 
-ifneq ($(filter nl80211,$(IWINFO_BACKENDS)),)
+
 	IWINFO_CFLAGS      += -DUSE_NL80211
 	IWINFO_CLI_LDFLAGS += -lnl-tiny
 	IWINFO_LIB_LDFLAGS += -lnl-tiny
 	IWINFO_LIB_OBJ     += iwinfo_nl80211.o
-endif
+
 
 
 %.o: %.c
