@@ -611,7 +611,7 @@ static void print_scanlist(const struct iwinfo_ops *iw, const char *ifname)
 
 static void print_txpwrlist(const struct iwinfo_ops *iw, const char *ifname)
 {
-	int len, pwr, off, i;
+	int len = 0, pwr, off, i;
 	char buf[IWINFO_BUFSIZE];
 	struct iwinfo_txpwrlist_entry *e;
 
@@ -629,7 +629,7 @@ static void print_txpwrlist(const struct iwinfo_ops *iw, const char *ifname)
 
 	for (i = 0; i < len; i += sizeof(struct iwinfo_txpwrlist_entry))
 	{
-		e = (struct iwinfo_txpwrlist_entry *) &buf[i];
+		e = (struct iwinfo_txpwrlist_entry *) (buf+i);
 
 		printf("%s%3d dBm (%4d mW)\n",
 			(pwr == e->dbm) ? "*" : " ",

@@ -1971,8 +1971,16 @@ static int nl80211_get_txpwrlist_cb(struct nl_msg *msg, void *arg)
 			nla_parse(freqs, NL80211_FREQUENCY_ATTR_MAX,
 			          nla_data(freq), nla_len(freq), freq_policy);
 
-			ch_cmp = nl80211_freq2channel(nla_get_u32(
-				freqs[NL80211_FREQUENCY_ATTR_FREQ]));
+			// ch_cmp = nl80211_freq2channel(nla_get_u32(
+			// 	freqs[NL80211_FREQUENCY_ATTR_FREQ]));
+			if (!freqs[NL80211_FREQUENCY_ATTR_FREQ] ||
+			    freqs[NL80211_FREQUENCY_ATTR_DISABLED])
+				continue;
+
+
+			ch_cmp = nla_get_u32(freqs[NL80211_FREQUENCY_ATTR_FREQ]);
+			ch_cmp = nl80211_freq2channel(ch_cmp);
+
 
 			if ((!ch_cur || (ch_cmp == ch_cur)) &&
 			    freqs[NL80211_FREQUENCY_ATTR_MAX_TX_POWER])
@@ -1994,7 +2002,7 @@ static int nl80211_get_txpwrlist(const char *ifname, char *buf, int *len)
 	int dbm_max = -1, dbm_cur, dbm_cnt;
 	struct nl80211_msg_conveyor *req;
 	struct iwinfo_txpwrlist_entry entry;
-
+	*len = 0;
 	if (nl80211_get_channel(ifname, &ch_cur))
 		ch_cur = 0;
 
