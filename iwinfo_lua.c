@@ -838,8 +838,8 @@ static const luaL_reg R_madwifi[] = {
 #ifdef USE_NL80211
 /* NL80211 table */
 static const luaL_reg R_nl80211[] = {
-	LUA_REG(nl80211,channel),
-	LUA_REG(nl80211,frequency),
+	LUA_REG(wext,channel),
+	LUA_REG(wext,frequency),
 	LUA_REG(nl80211,frequency_offset),
 	LUA_REG(nl80211,txpower),
 	LUA_REG(nl80211,txpower_offset),
