@@ -130,7 +130,7 @@ static char * format_noise(int noise)
 
 static char * format_rate(int rate)
 {
-	static char buf[14];
+	static char buf[18];
 
 	if (rate <= 0)
 		snprintf(buf, sizeof(buf), "unknown");
@@ -186,6 +186,12 @@ static char * format_enc_suites(int suites)
 	if (suites & IWINFO_KMGMT_8021x)
 		pos += sprintf(pos, "802.1X/");
 
+	if (suites & IWINFO_KMGMT_SAE)
+		pos += sprintf(pos, "SAE/");
+
+	if (suites & IWINFO_KMGMT_OWE)
+		pos += sprintf(pos, "OWE/");
+
 	if (!suites || (suites & IWINFO_KMGMT_NONE))
 		pos += sprintf(pos, "NONE/");
 
@@ -197,6 +203,8 @@ static char * format_enc_suites(int suites)
 static char * format_encryption(struct iwinfo_crypto_entry *c)
 {
 	static char buf[512];
+	char *pos = buf;
+	int i, n;
 
 	if (!c)
 	{
@@ -228,25 +236,25 @@ static char * format_encryption(struct iwinfo_crypto_entry *c)
 		/* WPA */
 		else if (c->wpa_version)
 		{
-			switch (c->wpa_version) {
-				case 3:
-					snprintf(buf, sizeof(buf), "mixed WPA/WPA2 %s (%s)",
-						format_enc_suites(c->auth_suites),
-						format_enc_ciphers(c->pair_ciphers | c->group_ciphers));
-					break;
+			for (i = 0, n = 0; i < 3; i++)
+				if (c->wpa_version & (1 << i))
+					n++;
 
-				case 2:
-					snprintf(buf, sizeof(buf), "WPA2 %s (%s)",
-						format_enc_suites(c->auth_suites),
-						format_enc_ciphers(c->pair_ciphers | c->group_ciphers));
-					break;
+			if (n > 1)
+				pos += sprintf(pos, "mixed ");
 
-				case 1:
-					snprintf(buf, sizeof(buf), "WPA %s (%s)",
-						format_enc_suites(c->auth_suites),
-						format_enc_ciphers(c->pair_ciphers | c->group_ciphers));
-					break;
-			}
+			for (i = 0; i < 3; i++)
+				if (c->wpa_version & (1 << i))
+					if (i)
+						pos += sprintf(pos, "WPA%d/", i + 1);
+					else
+						pos += sprintf(pos, "WPA/");
+
+			pos--;
+
+			sprintf(pos, " %s (%s)",
+				format_enc_suites(c->auth_suites),
+				format_enc_ciphers(c->pair_ciphers | c->group_ciphers));
 		}
 		else
 		{
@@ -263,17 +271,18 @@ static char * format_encryption(struct iwinfo_crypto_entry *c)
 
 static char * format_hwmodes(int modes)
 {
-	static char buf[12];
+	static char buf[15];
 
 	if (modes <= 0)
 		snprintf(buf, sizeof(buf), "unknown");
 	else
-		snprintf(buf, sizeof(buf), "802.11%s%s%s%s%s",
+		snprintf(buf, sizeof(buf), "802.11%s%s%s%s%s%s",
 			(modes & IWINFO_80211_A) ? "a" : "",
 			(modes & IWINFO_80211_B) ? "b" : "",
 			(modes & IWINFO_80211_G) ? "g" : "",
 			(modes & IWINFO_80211_N) ? "n" : "",
-			(modes & IWINFO_80211_AC) ? "ac" : "");
+			(modes & IWINFO_80211_AC) ? "ac" : "",
+			(modes & IWINFO_80211_AD) ? "ad" : "");
 
 	return buf;
 }

@@ -26,6 +26,7 @@
 #include <glob.h>
 #include <fnmatch.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "iwinfo_nl80211.h"
 
@@ -234,26 +235,49 @@ static struct nl80211_msg_conveyor * nl80211_ctl(int cmd, int flags)
 
 static int nl80211_phy_idx_from_uci_path(struct uci_section *s)
 {
-	const char *opt;
-	char buf[128];
+	size_t linklen, pathlen;
+	char buf[128], *link;
+	struct dirent *e;
+	const char *path;
 	int idx = -1;
-	glob_t gl;
+	DIR *d;
 
-	opt = uci_lookup_option_string(uci_ctx, s, "path");
-	if (!opt)
+	path = uci_lookup_option_string(uci_ctx, s, "path");
+	if (!path)
 		return -1;
 
-	snprintf(buf, sizeof(buf), "/sys/devices/%s/ieee80211/*/index", opt);  /**/
-	if (glob(buf, 0, NULL, &gl))
-		snprintf(buf, sizeof(buf), "/sys/devices/platform/%s/ieee80211/*/index", opt);  /**/
+	if ((d = opendir("/sys/class/ieee80211")) != NULL)
+	{
+		while ((e = readdir(d)) != NULL)
+		{
+			snprintf(buf, sizeof(buf), "/sys/class/ieee80211/%s/device", e->d_name);
 
-	if (glob(buf, 0, NULL, &gl))
-		return -1;
+			link = realpath(buf, NULL);
 
-	if (gl.gl_pathc > 0)
-		idx = nl80211_readint(gl.gl_pathv[0]);
+			if (link == NULL)
+				continue;
 
-	globfree(&gl);
+			linklen = strlen(link);
+			pathlen = strlen(path);
+
+			if (pathlen >= linklen || strcmp(link + (linklen - pathlen), path))
+				linklen = 0;
+
+			free(link);
+
+			if (linklen == 0)
+				continue;
+
+			snprintf(buf, sizeof(buf), "/sys/class/ieee80211/%s/index", e->d_name);
+
+			idx = nl80211_readint(buf);
+
+			if (idx >= 0)
+				break;
+		}
+
+		closedir(d);
+	}
 
 	return idx;
 }
@@ -343,7 +367,8 @@ static struct nl80211_msg_conveyor * nl80211_msg(const char *ifname,
 		phyidx = atoi(&ifname[3]);
 	else if (!strncmp(ifname, "radio", 5))
 		phyidx = nl80211_phy_idx_from_uci(ifname);
-	else if (!strncmp(ifname, "mon.", 4))
+
+	if (!strncmp(ifname, "mon.", 4))
 		ifidx = if_nametoindex(&ifname[4]);
 	else
 		ifidx = if_nametoindex(ifname);
@@ -356,10 +381,9 @@ static struct nl80211_msg_conveyor * nl80211_msg(const char *ifname,
 	if (!cv)
 		return NULL;
 
-	if (ifidx > -1)
+	if (ifidx > 0)
 		NLA_PUT_U32(cv->msg, NL80211_ATTR_IFINDEX, ifidx);
-
-	if (phyidx > -1)
+	else if (phyidx > -1)
 		NLA_PUT_U32(cv->msg, NL80211_ATTR_WIPHY, phyidx);
 
 	return cv;
@@ -568,6 +592,8 @@ static int nl80211_freq2channel(int freq)
 		return (freq - 2407) / 5;
 	else if (freq >= 4910 && freq <= 4980)
 		return (freq - 4000) / 5;
+	else if(freq >= 56160 + 2160 * 1 && freq <= 56160 + 2160 * 6)
+		return (freq - 56160) / 2160;
 	else
 		return (freq - 5000) / 5;
 }
@@ -580,6 +606,10 @@ static int nl80211_channel2freq(int channel, const char *band)
 			return 2484;
 		else if (channel < 14)
 			return (channel * 5) + 2407;
+	}
+	else if ( strcmp(band, "ad") == 0)
+	{
+		return 56160 + 2160 * channel;
 	}
 	else
 	{
@@ -864,7 +894,9 @@ static int __nl80211_wpactl_query(const char *ifname, ...)
 	if (nl80211_get_mode(ifname, &mode))
 		return 0;
 
-	if (mode != IWINFO_OPMODE_CLIENT && mode != IWINFO_OPMODE_ADHOC)
+	if (mode != IWINFO_OPMODE_CLIENT &&
+	    mode != IWINFO_OPMODE_ADHOC &&
+	    mode != IWINFO_OPMODE_MESHPOINT)
 		return 0;
 
 	sock = nl80211_wpactl_connect(ifname, &local);
@@ -1201,7 +1233,7 @@ static int nl80211_get_frequency_info_cb(struct nl_msg *msg, void *arg)
 
 static int nl80211_get_frequency(const char *ifname, int *buf)
 {
-	char *res, channel[4], hwmode[2];
+	char *res, channel[4], hwmode[3];
 
 	/* try to find frequency from interface info */
 	res = nl80211_phy2ifname(ifname);
@@ -1486,10 +1518,112 @@ static int nl80211_check_wepkey(const char *key)
 	return 0;
 }
 
+static struct {
+	const char *match;
+	int version;
+	int suite;
+} wpa_key_mgmt_strings[] = {
+	{ "IEEE 802.1X/EAP", 0, IWINFO_KMGMT_8021x },
+	{ "EAP-SUITE-B-192", 4, IWINFO_KMGMT_8021x },
+	{ "EAP-SUITE-B",     4, IWINFO_KMGMT_8021x },
+	{ "EAP-SHA256",      0, IWINFO_KMGMT_8021x },
+	{ "PSK-SHA256",      0, IWINFO_KMGMT_PSK },
+	{ "NONE",            0, IWINFO_KMGMT_NONE },
+	{ "None",            0, IWINFO_KMGMT_NONE },
+	{ "PSK",             0, IWINFO_KMGMT_PSK },
+	{ "EAP",             0, IWINFO_KMGMT_8021x },
+	{ "SAE",             4, IWINFO_KMGMT_SAE },
+	{ "OWE",             4, IWINFO_KMGMT_OWE }
+};
+
+static void parse_wpa_suites(const char *str, int defversion,
+                             uint8_t *versions, uint8_t *suites)
+{
+	size_t l;
+	int i, version;
+	const char *p, *q, *m, *sep = " \t\n,-+/";
+
+	for (p = str; *p; )
+	{
+		q = p;
+
+		for (i = 0; i < ARRAY_SIZE(wpa_key_mgmt_strings); i++)
+		{
+			m = wpa_key_mgmt_strings[i].match;
+			l = strlen(m);
+
+			if (!strncmp(q, m, l) && (!q[l] || strchr(sep, q[l])))
+			{
+				if (wpa_key_mgmt_strings[i].version != 0)
+					version = wpa_key_mgmt_strings[i].version;
+				else
+					version = defversion;
+
+				*versions |= version;
+				*suites |= wpa_key_mgmt_strings[i].suite;
+
+				q += l;
+				break;
+			}
+		}
+
+		if (q == p)
+			q += strcspn(q, sep);
+
+		p = q + strspn(q, sep);
+	}
+}
+
+static struct {
+	const char *match;
+	int cipher;
+} wpa_cipher_strings[] = {
+	{ "WEP-104", IWINFO_CIPHER_WEP104 },
+	{ "WEP-40",  IWINFO_CIPHER_WEP40 },
+	{ "NONE",    IWINFO_CIPHER_NONE },
+	{ "TKIP",    IWINFO_CIPHER_TKIP },
+	{ "CCMP",    IWINFO_CIPHER_CCMP }
+};
+
+static void parse_wpa_ciphers(const char *str, uint8_t *ciphers)
+{
+	int i;
+	size_t l;
+	const char *m, *p, *q, *sep = " \t\n,-+/";
+
+	for (p = str; *p; )
+	{
+		q = p;
+
+		for (i = 0; i < ARRAY_SIZE(wpa_cipher_strings); i++)
+		{
+			m = wpa_cipher_strings[i].match;
+			l = strlen(m);
+
+			if (!strncmp(q, m, l) && (!q[l] || strchr(sep, q[l])))
+			{
+				*ciphers |= wpa_cipher_strings[i].cipher;
+
+				q += l;
+				break;
+			}
+		}
+
+		if (q == p)
+			q += strcspn(q, sep);
+
+		p = q + strspn(q, sep);
+	}
+}
+
 static int nl80211_get_encryption(const char *ifname, char *buf)
 {
-	char wpa[2], wpa_key_mgmt[16], wpa_pairwise[16], wpa_groupwise[16];
+	char *p;
+	int opmode;
+	uint8_t wpa_version = 0;
+	char wpa[2], wpa_key_mgmt[64], wpa_pairwise[16], wpa_groupwise[16];
 	char auth_algs[2], wep_key0[27], wep_key1[27], wep_key2[27], wep_key3[27];
+	char mode[16];
 
 	struct iwinfo_crypto_entry *c = (struct iwinfo_crypto_entry *)buf;
 
@@ -1497,63 +1631,56 @@ static int nl80211_get_encryption(const char *ifname, char *buf)
 	if (nl80211_wpactl_query(ifname,
 			"pairwise_cipher", wpa_pairwise,  sizeof(wpa_pairwise),
 			"group_cipher",    wpa_groupwise, sizeof(wpa_groupwise),
-			"key_mgmt",        wpa_key_mgmt,  sizeof(wpa_key_mgmt)))
+			"key_mgmt",        wpa_key_mgmt,  sizeof(wpa_key_mgmt),
+			"mode",            mode,          sizeof(mode)))
 	{
-		/* WEP */
+		/* WEP or Open */
 		if (!strcmp(wpa_key_mgmt, "NONE"))
 		{
-			if (strstr(wpa_pairwise, "WEP-40"))
-				c->pair_ciphers |= IWINFO_CIPHER_WEP40;
-			else if (strstr(wpa_pairwise, "WEP-104"))
-				c->pair_ciphers |= IWINFO_CIPHER_WEP104;
+			parse_wpa_ciphers(wpa_pairwise, &c->pair_ciphers);
+			parse_wpa_ciphers(wpa_groupwise, &c->group_ciphers);
 
-			if (strstr(wpa_groupwise, "WEP-40"))
-				c->group_ciphers |= IWINFO_CIPHER_WEP40;
-			else if (strstr(wpa_groupwise, "WEP-104"))
-				c->group_ciphers |= IWINFO_CIPHER_WEP104;
+			if (c->pair_ciphers != 0 && c->pair_ciphers != IWINFO_CIPHER_NONE) {
+				c->enabled     = 1;
+				c->auth_suites = IWINFO_KMGMT_NONE;
+				c->auth_algs   = IWINFO_AUTH_OPEN | IWINFO_AUTH_SHARED;
+			}
+			else {
+				c->pair_ciphers = 0;
+				c->group_ciphers = 0;
+			}
+		}
 
-			c->enabled      = !!(c->pair_ciphers | c->group_ciphers);
-			c->auth_suites |= IWINFO_KMGMT_NONE;
-			c->auth_algs   |= IWINFO_AUTH_OPEN; /* XXX: assumption */
+		/* MESH with SAE */
+		else if (!strcmp(mode, "mesh") && !strcmp(wpa_key_mgmt, "UNKNOWN"))
+		{
+			c->enabled = 1;
+			c->wpa_version = 4;
+			c->auth_suites = IWINFO_KMGMT_SAE;
+			c->pair_ciphers = IWINFO_CIPHER_CCMP;
+			c->group_ciphers = IWINFO_CIPHER_CCMP;
 		}
 
 		/* WPA */
-		else if (strstr(wpa_key_mgmt, "WPA"))
+		else
 		{
-			if (strstr(wpa_pairwise, "TKIP"))
-				c->pair_ciphers |= IWINFO_CIPHER_TKIP;
-			else if (strstr(wpa_pairwise, "CCMP"))
-				c->pair_ciphers |= IWINFO_CIPHER_CCMP;
-			else if (strstr(wpa_pairwise, "NONE"))
-				c->pair_ciphers |= IWINFO_CIPHER_NONE;
-			else if (strstr(wpa_pairwise, "WEP-40"))
-				c->pair_ciphers |= IWINFO_CIPHER_WEP40;
-			else if (strstr(wpa_pairwise, "WEP-104"))
-				c->pair_ciphers |= IWINFO_CIPHER_WEP104;
+			parse_wpa_ciphers(wpa_pairwise, &c->pair_ciphers);
+			parse_wpa_ciphers(wpa_groupwise, &c->group_ciphers);
 
-			if (strstr(wpa_groupwise, "TKIP"))
-				c->group_ciphers |= IWINFO_CIPHER_TKIP;
-			else if (strstr(wpa_groupwise, "CCMP"))
-				c->group_ciphers |= IWINFO_CIPHER_CCMP;
-			else if (strstr(wpa_groupwise, "NONE"))
-				c->group_ciphers |= IWINFO_CIPHER_NONE;
-			else if (strstr(wpa_groupwise, "WEP-40"))
-				c->group_ciphers |= IWINFO_CIPHER_WEP40;
-			else if (strstr(wpa_groupwise, "WEP-104"))
-				c->group_ciphers |= IWINFO_CIPHER_WEP104;
+			p = wpa_key_mgmt;
 
-			if (strstr(wpa_key_mgmt, "WPA2"))
-				c->wpa_version = 2;
-			else if (strstr(wpa_key_mgmt, "WPA"))
-				c->wpa_version = 1;
+			if (!strncmp(p, "WPA2-", 5) || !strncmp(p, "WPA2/", 5))
+			{
+				p += 5;
+				wpa_version = 2;
+			}
+			else if (!strncmp(p, "WPA-", 4))
+			{
+				p += 4;
+				wpa_version = 1;
+			}
 
-			if (strstr(wpa_key_mgmt, "PSK"))
-				c->auth_suites |= IWINFO_KMGMT_PSK;
-			else if (strstr(wpa_key_mgmt, "EAP") ||
-			         strstr(wpa_key_mgmt, "802.1X"))
-				c->auth_suites |= IWINFO_KMGMT_8021x;
-			else if (strstr(wpa_key_mgmt, "NONE"))
-				c->auth_suites |= IWINFO_KMGMT_NONE;
+			parse_wpa_suites(p, wpa_version, &c->wpa_version, &c->auth_suites);
 
 			c->enabled = !!(c->wpa_version && c->auth_suites);
 		}
@@ -1572,39 +1699,27 @@ static int nl80211_get_encryption(const char *ifname, char *buf)
 				"wep_key2",     wep_key2,     sizeof(wep_key2),
 				"wep_key3",     wep_key3,     sizeof(wep_key3)))
 	{
-		c->wpa_version = wpa[0] ? atoi(wpa) : 0;
+		c->wpa_version = 0;
 
 		if (wpa_key_mgmt[0])
 		{
-			if (strstr(wpa_key_mgmt, "PSK"))
-				c->auth_suites |= IWINFO_KMGMT_PSK;
+			for (p = strtok(wpa_key_mgmt, " \t"); p != NULL; p = strtok(NULL, " \t"))
+			{
+				if (!strncmp(p, "WPA-", 4))
+					p += 4;
 
-			if (strstr(wpa_key_mgmt, "EAP"))
-				c->auth_suites |= IWINFO_KMGMT_8021x;
+				parse_wpa_suites(p, atoi(wpa), &c->wpa_version, &c->auth_suites);
+			}
 
-			if (strstr(wpa_key_mgmt, "NONE"))
-				c->auth_suites |= IWINFO_KMGMT_NONE;
-		}
-		else
-		{
-			c->auth_suites |= IWINFO_KMGMT_PSK;
+			c->enabled = c->wpa_version ? 1 : 0;
 		}
 
 		if (wpa_pairwise[0])
-		{
-			if (strstr(wpa_pairwise, "TKIP"))
-				c->pair_ciphers |= IWINFO_CIPHER_TKIP;
-
-			if (strstr(wpa_pairwise, "CCMP"))
-				c->pair_ciphers |= IWINFO_CIPHER_CCMP;
-
-			if (strstr(wpa_pairwise, "NONE"))
-				c->pair_ciphers |= IWINFO_CIPHER_NONE;
-		}
+			parse_wpa_ciphers(wpa_pairwise, &c->pair_ciphers);
 
 		if (auth_algs[0])
 		{
-			switch(atoi(auth_algs))
+			switch (atoi(auth_algs))
 			{
 			case 1:
 				c->auth_algs |= IWINFO_AUTH_OPEN;
@@ -1624,13 +1739,25 @@ static int nl80211_get_encryption(const char *ifname, char *buf)
 			c->pair_ciphers |= nl80211_check_wepkey(wep_key1);
 			c->pair_ciphers |= nl80211_check_wepkey(wep_key2);
 			c->pair_ciphers |= nl80211_check_wepkey(wep_key3);
+
+			c->enabled = (c->auth_algs && c->pair_ciphers) ? 1 : 0;
 		}
 
 		c->group_ciphers = c->pair_ciphers;
-		c->enabled = (c->wpa_version || c->pair_ciphers) ? 1 : 0;
 
 		return 0;
 	}
+
+	/* Ad-Hoc or Mesh interfaces without wpa_supplicant are open */
+	else if (!nl80211_get_mode(ifname, &opmode) &&
+	         (opmode == IWINFO_OPMODE_ADHOC ||
+	          opmode == IWINFO_OPMODE_MESHPOINT))
+	{
+		c->enabled = 0;
+
+		return 0;
+	}
+
 
 	return -1;
 }
@@ -1756,6 +1883,57 @@ static int nl80211_get_survey_cb(struct nl_msg *msg, void *arg)
 	return NL_SKIP;
 }
 
+
+static void plink_state_to_str(char *dst, unsigned state)
+{
+	switch (state) {
+	case NL80211_PLINK_LISTEN:
+		strcpy(dst, "LISTEN");
+		break;
+	case NL80211_PLINK_OPN_SNT:
+		strcpy(dst, "OPN_SNT");
+		break;
+	case NL80211_PLINK_OPN_RCVD:
+		strcpy(dst, "OPN_RCVD");
+		break;
+	case NL80211_PLINK_CNF_RCVD:
+		strcpy(dst, "CNF_RCVD");
+		break;
+	case NL80211_PLINK_ESTAB:
+		strcpy(dst, "ESTAB");
+		break;
+	case NL80211_PLINK_HOLDING:
+		strcpy(dst, "HOLDING");
+		break;
+	case NL80211_PLINK_BLOCKED:
+		strcpy(dst, "BLOCKED");
+		break;
+	default:
+		strcpy(dst, "UNKNOWN");
+		break;
+	}
+}
+
+static void power_mode_to_str(char *dst, struct nlattr *a)
+{
+	enum nl80211_mesh_power_mode pm = nla_get_u32(a);
+
+	switch (pm) {
+	case NL80211_MESH_POWER_ACTIVE:
+		strcpy(dst, "ACTIVE");
+		break;
+	case NL80211_MESH_POWER_LIGHT_SLEEP:
+		strcpy(dst, "LIGHT SLEEP");
+		break;
+	case NL80211_MESH_POWER_DEEP_SLEEP:
+		strcpy(dst, "DEEP SLEEP");
+		break;
+	default:
+		strcpy(dst, "UNKNOWN");
+		break;
+	}
+}
+
 static int nl80211_get_assoclist_cb(struct nl_msg *msg, void *arg)
 {
 	struct nl80211_array_buf *arr = arg;
@@ -1783,6 +1961,13 @@ static int nl80211_get_assoclist_cb(struct nl_msg *msg, void *arg)
 		[NL80211_STA_INFO_STA_FLAGS] =
 			{ .minlen = sizeof(struct nl80211_sta_flag_update) },
 		[NL80211_STA_INFO_EXPECTED_THROUGHPUT]   = { .type = NLA_U32    },
+		/* mesh */
+		[NL80211_STA_INFO_LLID]          = { .type = NLA_U16	},
+		[NL80211_STA_INFO_PLID]          = { .type = NLA_U16	},
+		[NL80211_STA_INFO_PLINK_STATE]   = { .type = NLA_U8	},
+		[NL80211_STA_INFO_LOCAL_PM]      = { .type = NLA_U32	},
+		[NL80211_STA_INFO_PEER_PM]       = { .type = NLA_U32	},
+		[NL80211_STA_INFO_NONPEER_PM]    = { .type = NLA_U32	},
 	};
 
 	static struct nla_policy rate_policy[NL80211_RATE_INFO_MAX + 1] = {
@@ -1851,6 +2036,24 @@ static int nl80211_get_assoclist_cb(struct nl_msg *msg, void *arg)
 
 		if (sinfo[NL80211_STA_INFO_EXPECTED_THROUGHPUT])
 			e->thr = nla_get_u32(sinfo[NL80211_STA_INFO_EXPECTED_THROUGHPUT]);
+
+		/* mesh */
+		if (sinfo[NL80211_STA_INFO_LLID])
+			e->llid = nla_get_u16(sinfo[NL80211_STA_INFO_LLID]);
+
+		if (sinfo[NL80211_STA_INFO_PLID])
+			e->plid = nla_get_u16(sinfo[NL80211_STA_INFO_PLID]);
+
+		if (sinfo[NL80211_STA_INFO_PLINK_STATE])
+			plink_state_to_str(e->plink_state,
+				nla_get_u8(sinfo[NL80211_STA_INFO_PLINK_STATE]));
+
+		if (sinfo[NL80211_STA_INFO_LOCAL_PM])
+			power_mode_to_str(e->local_ps, sinfo[NL80211_STA_INFO_LOCAL_PM]);
+		if (sinfo[NL80211_STA_INFO_PEER_PM])
+			power_mode_to_str(e->peer_ps, sinfo[NL80211_STA_INFO_PEER_PM]);
+		if (sinfo[NL80211_STA_INFO_NONPEER_PM])
+			power_mode_to_str(e->nonpeer_ps, sinfo[NL80211_STA_INFO_NONPEER_PM]);
 
 		/* Station flags */
 		if (sinfo[NL80211_STA_INFO_STA_FLAGS])
@@ -2037,53 +2240,39 @@ static int nl80211_get_txpwrlist(const char *ifname, char *buf, int *len)
 	return -1;
 }
 
-static void nl80211_get_scancrypto(const char *spec,
-	struct iwinfo_crypto_entry *c)
+static void nl80211_get_scancrypto(char *spec, struct iwinfo_crypto_entry *c)
 {
-	if (strstr(spec, "WPA") || strstr(spec, "WEP"))
-	{
+	int wpa_version = 0;
+	char *p, *q, *proto, *suites;
+
+	c->enabled = 0;
+
+	for (p = strtok_r(spec, "[]", &q); p; p = strtok_r(NULL, "[]", &q)) {
+		if (!strcmp(p, "WEP")) {
+			c->enabled      = 1;
+			c->auth_suites  = IWINFO_KMGMT_NONE;
+			c->auth_algs    = IWINFO_AUTH_OPEN | IWINFO_AUTH_SHARED;
+			c->pair_ciphers = IWINFO_CIPHER_WEP40 | IWINFO_CIPHER_WEP104;
+			break;
+		}
+
+		proto = strtok(p, "-");
+		suites = strtok(NULL, "]");
+
+		if (!proto || !suites)
+			continue;
+
+		if (!strcmp(proto, "WPA2") || !strcmp(proto, "RSN"))
+			wpa_version = 2;
+		else if (!strcmp(proto, "WPA"))
+			wpa_version = 1;
+		else
+			continue;
+
 		c->enabled = 1;
 
-		if (strstr(spec, "WPA2-") && strstr(spec, "WPA-"))
-			c->wpa_version = 3;
-
-		else if (strstr(spec, "WPA2"))
-			c->wpa_version = 2;
-
-		else if (strstr(spec, "WPA"))
-			c->wpa_version = 1;
-
-		else if (strstr(spec, "WEP"))
-			c->auth_algs = IWINFO_AUTH_OPEN | IWINFO_AUTH_SHARED;
-
-
-		if (strstr(spec, "PSK"))
-			c->auth_suites |= IWINFO_KMGMT_PSK;
-
-		if (strstr(spec, "802.1X") || strstr(spec, "EAP"))
-			c->auth_suites |= IWINFO_KMGMT_8021x;
-
-		if (strstr(spec, "WPA-NONE"))
-			c->auth_suites |= IWINFO_KMGMT_NONE;
-
-
-		if (strstr(spec, "TKIP"))
-			c->pair_ciphers |= IWINFO_CIPHER_TKIP;
-
-		if (strstr(spec, "CCMP"))
-			c->pair_ciphers |= IWINFO_CIPHER_CCMP;
-
-		if (strstr(spec, "WEP-40"))
-			c->pair_ciphers |= IWINFO_CIPHER_WEP40;
-
-		if (strstr(spec, "WEP-104"))
-			c->pair_ciphers |= IWINFO_CIPHER_WEP104;
-
-		c->group_ciphers = c->pair_ciphers;
-	}
-	else
-	{
-		c->enabled = 0;
+		parse_wpa_suites(suites, wpa_version, &c->wpa_version, &c->auth_suites);
+		parse_wpa_ciphers(suites, &c->pair_ciphers);
 	}
 }
 
@@ -2340,8 +2529,14 @@ static int nl80211_get_scanlist_wpactl(const char *ifname, char *buf, int *len)
 			tries--;
 		}
 
-		/* got a failure reply */
+		/* scanning already in progress, keep awaiting results */
 		else if (!strcmp(reply, "FAIL-BUSY\n"))
+		{
+			tries--;
+		}
+
+		/* another failure, abort */
+		else if (!strncmp(reply, "FAIL-", 5))
 		{
 			break;
 		}
@@ -2373,7 +2568,7 @@ static int nl80211_get_scanlist_wpactl(const char *ifname, char *buf, int *len)
 			flags  = strtok(NULL, "\t");
 			ssid   = strtok(NULL, "\n");
 
-			if (!bssid || !freq || !signal || !flags || !ssid)
+			if (!bssid || !freq || !signal || !flags)
 				continue;
 
 			/* BSSID */
@@ -2385,7 +2580,10 @@ static int nl80211_get_scanlist_wpactl(const char *ifname, char *buf, int *len)
 			e->mac[5] = strtol(&bssid[15], NULL, 16);
 
 			/* SSID */
-			wpasupp_ssid_decode(ssid, e->ssid, sizeof(e->ssid));
+			if (ssid)
+				wpasupp_ssid_decode(ssid, e->ssid, sizeof(e->ssid));
+			else
+				e->ssid[0] = 0;
 
 			/* Mode */
 			if (strstr(flags, "[MESH]"))
@@ -2732,6 +2930,10 @@ static int nl80211_get_modelist_cb(struct nl_msg *msg, void *arg)
 						}
 					}
 				}
+				else if (nla_get_u32(freqs[NL80211_FREQUENCY_ATTR_FREQ]) >= 56160)
+				{
+					m->hw |= IWINFO_80211_AD;
+				}
 				else if (!(m->hw & IWINFO_80211_AC))
 				{
 					m->hw |= IWINFO_80211_A;
@@ -2762,6 +2964,75 @@ static int nl80211_get_hwmodelist(const char *ifname, int *buf)
 out:
 	*buf = 0;
 	return -1;
+}
+
+struct chan_info {
+	int width;
+	int mode;
+};
+
+static int nl80211_get_htmode_cb(struct nl_msg *msg, void *arg)
+{
+	struct nlattr **tb = nl80211_parse(msg);
+	struct nlattr *cur;
+	struct chan_info *chn = arg;
+
+	if ((cur = tb[NL80211_ATTR_CHANNEL_WIDTH]))
+		chn->width = nla_get_u32(cur);
+
+	if ((cur = tb[NL80211_ATTR_BSS_HT_OPMODE]))
+		chn->mode = nla_get_u32(cur);
+
+	return NL_SKIP;
+}
+
+static int nl80211_get_htmode(const char *ifname, int *buf)
+{
+	struct chan_info chn = { .width = 0, .mode = 0 };
+	char *res;
+	int err;
+
+	res = nl80211_phy2ifname(ifname);
+	*buf = 0;
+
+	err =  nl80211_request(res ? res : ifname,
+				NL80211_CMD_GET_INTERFACE, 0,
+				nl80211_get_htmode_cb, &chn);
+	if (err)
+		return -1;
+
+	switch (chn.width) {
+	case NL80211_CHAN_WIDTH_20:
+		if (chn.mode == -1)
+			*buf = IWINFO_HTMODE_VHT20;
+		else
+			*buf = IWINFO_HTMODE_HT20;
+		break;
+	case NL80211_CHAN_WIDTH_40:
+		if (chn.mode == -1)
+			*buf = IWINFO_HTMODE_VHT40;
+		else
+			*buf = IWINFO_HTMODE_HT40;
+		break;
+	case NL80211_CHAN_WIDTH_80:
+		*buf = IWINFO_HTMODE_VHT80;
+		break;
+	case NL80211_CHAN_WIDTH_80P80:
+		*buf = IWINFO_HTMODE_VHT80_80;
+		break;
+	case NL80211_CHAN_WIDTH_160:
+		*buf = IWINFO_HTMODE_VHT160;
+		break;
+	case NL80211_CHAN_WIDTH_5:
+	case NL80211_CHAN_WIDTH_10:
+	case NL80211_CHAN_WIDTH_20_NOHT:
+		*buf = IWINFO_HTMODE_NOHT;
+		break;
+	default:
+		return -1;
+	}
+
+	return 0;
 }
 
 static int nl80211_get_htmodelist(const char *ifname, int *buf)
@@ -2848,37 +3119,37 @@ static int nl80211_get_mbssid_support(const char *ifname, int *buf)
 
 static int nl80211_get_hardware_id(const char *ifname, char *buf)
 {
-	int rv = -1;
-	char *res;
+	struct iwinfo_hardware_id *id = (struct iwinfo_hardware_id *)buf;
+	char *phy, num[8], path[PATH_MAX];
+	int i;
 
-	/* Got a radioX pseudo interface, find some interface on it or create one */
-	if (!strncmp(ifname, "radio", 5))
-	{
-		/* Reuse existing interface */
-		if ((res = nl80211_phy2ifname(ifname)) != NULL)
-		{
-			rv = wext_ops.hardware_id(res, buf);
-		}
+	struct { const char *path; uint16_t *dest; } lookup[] = {
+		{ "vendor", &id->vendor_id },
+		{ "device", &id->device_id },
+		{ "subsystem_vendor", &id->subsystem_vendor_id },
+		{ "subsystem_device", &id->subsystem_device_id }
+	};
 
-		/* Need to spawn a temporary iface for finding IDs */
-		else if ((res = nl80211_ifadd(ifname)) != NULL)
-		{
-			rv = wext_ops.hardware_id(res, buf);
-			nl80211_ifdel(res);
-		}
-	}
-	else
+	memset(id, 0, sizeof(*id));
+
+	/* Try to determine the phy name from the given interface */
+	phy = nl80211_ifname2phy(ifname);
+
+	for (i = 0; i < ARRAY_SIZE(lookup); i++)
 	{
-		rv = wext_ops.hardware_id(ifname, buf);
+		snprintf(path, sizeof(path), "/sys/class/%s/%s/device/%s",
+		         phy ? "ieee80211" : "net",
+		         phy ? phy : ifname, lookup[i].path);
+
+		if (nl80211_readstr(path, num, sizeof(num)) > 0)
+			*lookup[i].dest = strtoul(num, NULL, 16);
 	}
 
 	/* Failed to obtain hardware IDs, search board config */
-	if (rv)
-	{
-		rv = iwinfo_hardware_id_from_mtd((struct iwinfo_hardware_id *)buf);
-	}
+	if (id->vendor_id == 0 || id->device_id == 0)
+		return iwinfo_hardware_id_from_mtd(id);
 
-	return rv;
+	return 0;
 }
 
 static const struct iwinfo_hardware_entry *
@@ -2953,6 +3224,7 @@ const struct iwinfo_ops nl80211_ops = {
 	.mbssid_support   = nl80211_get_mbssid_support,
 	.hwmodelist       = nl80211_get_hwmodelist,
 	.htmodelist       = nl80211_get_htmodelist,
+	.htmode		  = nl80211_get_htmode,
 	.mode             = nl80211_get_mode,
 	.ssid             = nl80211_get_ssid,
 	.bssid            = nl80211_get_bssid,

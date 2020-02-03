@@ -28,6 +28,7 @@
 #define IWINFO_80211_G       (1 << 2)
 #define IWINFO_80211_N       (1 << 3)
 #define IWINFO_80211_AC      (1 << 4)
+#define IWINFO_80211_AD      (1 << 5)
 
 #define IWINFO_CIPHER_NONE   (1 << 0)
 #define IWINFO_CIPHER_WEP40  (1 << 1)
@@ -42,7 +43,9 @@
 #define IWINFO_KMGMT_NONE    (1 << 0)
 #define IWINFO_KMGMT_8021x   (1 << 1)
 #define IWINFO_KMGMT_PSK     (1 << 2)
-#define IWINFO_KMGMT_COUNT   3
+#define IWINFO_KMGMT_SAE     (1 << 3)
+#define IWINFO_KMGMT_OWE     (1 << 4)
+#define IWINFO_KMGMT_COUNT   5
 
 #define IWINFO_AUTH_OPEN     (1 << 0)
 #define IWINFO_AUTH_SHARED   (1 << 1)
@@ -54,6 +57,7 @@
 #define IWINFO_FREQ_NO_HT40MINUS	(1 << 3)
 #define IWINFO_FREQ_NO_80MHZ		(1 << 4)
 #define IWINFO_FREQ_NO_160MHZ		(1 << 5)
+#define IWINFO_FREQ_NO_2160MHZ		(1 << 6)
 
 extern const char *IWINFO_CIPHER_NAMES[IWINFO_CIPHER_COUNT];
 extern const char *IWINFO_KMGMT_NAMES[IWINFO_KMGMT_COUNT];
@@ -84,8 +88,9 @@ enum iwinfo_htmode {
 	IWINFO_HTMODE_VHT80      = (1 << 4),
 	IWINFO_HTMODE_VHT80_80   = (1 << 5),
 	IWINFO_HTMODE_VHT160     = (1 << 6),
+	IWINFO_HTMODE_NOHT       = (1 << 7),
 
-	IWINFO_HTMODE_COUNT      = 7
+	IWINFO_HTMODE_COUNT      = 8
 };
 
 extern const char *IWINFO_HTMODE_NAMES[IWINFO_HTMODE_COUNT];
@@ -126,6 +131,12 @@ struct iwinfo_assoclist_entry {
 	uint8_t is_mfp:1;
 	uint8_t is_tdls:1;
 	uint32_t thr;
+	uint16_t llid;
+	uint16_t plid;
+	char plink_state[16];
+	char local_ps[16];
+	char peer_ps[16];
+	char nonpeer_ps[16];
 };
 
 struct iwinfo_survey_entry {
@@ -221,6 +232,7 @@ struct iwinfo_ops {
 	int (*mbssid_support)(const char *, int *);
 	int (*hwmodelist)(const char *, int *);
 	int (*htmodelist)(const char *, int *);
+	int (*htmode)(const char *, int *);
 	int (*ssid)(const char *, char *);
 	int (*bssid)(const char *, char *);
 	int (*country)(const char *, char *);
